@@ -8,12 +8,21 @@
     "dev": "nodemon src/index.js"
   },
   "dependencies": {
+<<<<<<< HEAD
     "@supabase/supabase-js": "^2.97.0",
     "axios": "^1.13.5",
     "dotenv": "^16.6.1",
     "helius-sdk": "^2.2.1",
     "node-telegram-bot-api": "^0.63.0",
     "ws": "^8.19.0"
+=======
+    
+    "@supabase/supabase-js": "^2.39.0",
+    "axios": "^1.6.0",
+    "dotenv": "^16.3.1",
+    "node-telegram-bot-api": "^0.64.0",
+    "ws": "^8.16.0"
+>>>>>>> e4f50ad085238d37c9ec6a7e5e8760bf51bb3846
   },
   "devDependencies": {
     "nodemon": "^1.0.2"
