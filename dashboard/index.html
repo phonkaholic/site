@@ -6,7 +6,264 @@
 <title>trencher — solana gem scanner</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;700;900&family=Share+Tech+Mono&family=Rajdhani:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2">
+// ══════════════════════════════════════════════════════════
+// TAB SWITCHER
+// ══════════════════════════════════════════════════════════
+function switchTab(tab) {
+  const feed = document.getElementById('panel-feed');
+  const scanner = document.getElementById('panel-scanner');
+  const tabFeed = document.getElementById('tab-feed');
+  const tabScanner = document.getElementById('tab-scanner');
+  if (tab === 'feed') {
+    feed.style.display = 'grid';
+    scanner.style.display = 'none';
+    tabFeed.classList.add('active');
+    tabScanner.classList.remove('active');
+  } else {
+    feed.style.display = 'none';
+    scanner.style.display = 'block';
+    tabFeed.classList.remove('active');
+    tabScanner.classList.add('active');
+    document.getElementById('ca-input').focus();
+  }
+}
+
+// ══════════════════════════════════════════════════════════
+// CA SCANNER
+// ══════════════════════════════════════════════════════════
+async function analyzeCA() {
+  const input = document.getElementById('ca-input');
+  const result = document.getElementById('ca-result');
+  const btn = document.getElementById('ca-btn');
+  const ca = input.value.trim();
+
+  if (!ca || ca.length < 32) {
+    result.innerHTML = '<div class="ca-error">⚠ Invalid address — Solana CAs are 32-44 characters</div>';
+    return;
+  }
+
+  // Show scanning animation
+  result.innerHTML = `<div class="ca-scanning">
+    <div class="ca-scanning-ring"></div>
+    <div style="font-family:var(--font-display);font-size:11px;letter-spacing:3px;color:var(--cyan)">SCANNING CONTRACT</div>
+    <div style="font-size:11px;color:rgba(200,232,248,0.4);margin-top:8px">${ca.slice(0,12)}...${ca.slice(-8)}</div>
+  </div>`;
+  btn.disabled = true;
+  btn.textContent = 'SCANNING...';
+
+  try {
+    // Fetch from DexScreener
+    const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${ca}`);
+    const data = await res.json();
+    const pairs = data.pairs || [];
+
+    if (!pairs.length) {
+      result.innerHTML = `<div class="ca-error">
+        ⚠ No trading pairs found for this address.<br><br>
+        <span style="color:rgba(200,232,248,0.4)">Token may not be listed yet, or the address may be incorrect.</span><br><br>
+        <div style="margin-top:12px;display:flex;gap:10px;">
+          <a class="modal-link" href="https://solscan.io/token/${ca}" target="_blank">🔎 Check Solscan</a>
+          <a class="modal-link" href="https://pump.fun/${ca}" target="_blank">🔗 Check Pump.fun</a>
+        </div>
+      </div>`;
+      return;
+    }
+
+    // Pick best pair
+    const pair = pairs.find(p => p.dexId === 'pumpfun') ||
+                 pairs.sort((a,b) => (b.liquidity?.usd||0) - (a.liquidity?.usd||0))[0];
+
+    // Build token data object
+    const token = {
+      address: ca,
+      name: pair.baseToken?.name || 'Unknown',
+      symbol: pair.baseToken?.symbol || '???',
+      priceUsd: parseFloat(pair.priceUsd || 0),
+      priceChange5m: pair.priceChange?.m5 || 0,
+      priceChange1h: pair.priceChange?.h1 || 0,
+      priceChange6h: pair.priceChange?.h6 || 0,
+      volume5m: pair.volume?.m5 || 0,
+      volume1h: pair.volume?.h1 || 0,
+      volume24h: pair.volume?.h24 || 0,
+      liquidityUsd: pair.liquidity?.usd || 0,
+      fdv: pair.fdv || 0,
+      marketCap: pair.marketCap || 0,
+      buys5m: pair.txns?.m5?.buys || 0,
+      sells5m: pair.txns?.m5?.sells || 0,
+      buys1h: pair.txns?.h1?.buys || 0,
+      sells1h: pair.txns?.h1?.sells || 0,
+      buyRatio5m: calcBuyRatio(pair.txns?.m5),
+      pairCreatedAt: pair.pairCreatedAt,
+      imageUrl: pair.info?.imageUrl,
+      socials: pair.info?.socials || [],
+      websites: pair.info?.websites || [],
+      dexUrl: pair.url,
+      dexId: pair.dexId,
+      pairCount: pairs.length,
+    };
+
+    // Run scoring engine
+    const scoreResult = caScore(token);
+    renderCAResult(token, scoreResult, pairs);
+
+  } catch(err) {
+    result.innerHTML = `<div class="ca-error">⚠ Fetch error: ${err.message}<br><span style="color:rgba(200,232,248,0.4)">DexScreener may be temporarily unavailable. Try again in a few seconds.</span></div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '⬡ ANALYZE';
+  }
+}
+
+function calcBuyRatio(txns) {
+  if (!txns) return 0.5;
+  const total = (txns.buys||0) + (txns.sells||0);
+  return total === 0 ? 0.5 : txns.buys / total;
+}
+
+// Inline scoring for CA scanner (no backend needed)
+function caScore(t) {
+  let score = 0;
+  const flags = [];
+  const warnings = [];
+
+  // Disqualifiers
+  if (t.liquidityUsd < 3000) { warnings.push('⚠ LOW LIQUIDITY'); }
+  if (t.buyRatio5m < 0.3)    { warnings.push('⚠ HEAVY SELLING'); }
+
+  // Momentum (0-40)
+  if (t.buyRatio5m >= 0.75)      { score += 18; flags.push('STRONG_BUY_PRESSURE'); }
+  else if (t.buyRatio5m >= 0.6)  { score += 10; flags.push('MODERATE_BUY_PRESSURE'); }
+  if (t.priceChange5m >= 50)     { score += 12; flags.push('5M_EXPLOSION'); }
+  else if (t.priceChange5m >= 20){ score += 8;  flags.push('5M_SURGE'); }
+  else if (t.priceChange5m >= 5) { score += 4;  flags.push('5M_PUMP'); }
+  if (t.buys5m >= 50)            { score += 10; flags.push('HIGH_ORGANIC_BUYS'); }
+  else if (t.buys5m >= 20)       { score += 5;  flags.push('ORGANIC_BUYS'); }
+
+  // Liquidity safety (0-20)
+  if (t.liquidityUsd >= 50000)   { score += 12; flags.push('STRONG_LIQUIDITY'); }
+  else if (t.liquidityUsd >= 15000){ score += 6; flags.push('DECENT_LIQUIDITY'); }
+  else if (t.liquidityUsd >= 5000) { score += 2; flags.push('LOW_LIQUIDITY'); }
+
+  // Age bonus (0-10)
+  const ageMin = t.pairCreatedAt ? (Date.now() - t.pairCreatedAt) / 60000 : 999;
+  if (ageMin <= 5)        { score += 10; flags.push('ULTRA_EARLY'); }
+  else if (ageMin <= 15)  { score += 6;  flags.push('EARLY_ENTRY'); }
+  else if (ageMin <= 60)  { score += 2;  flags.push('RECENT'); }
+
+  // Social (0-15)
+  if (t.socials?.some(s=>s.type==='twitter'))  { score += 5; flags.push('HAS_TWITTER'); }
+  if (t.socials?.some(s=>s.type==='telegram')) { score += 5; flags.push('HAS_TELEGRAM'); }
+  if (t.websites?.length > 0)                  { score += 5; flags.push('HAS_WEBSITE'); }
+
+  // Multi-pair bonus
+  if (t.pairCount > 3) { score += 5; flags.push('MULTI_DEX'); }
+
+  score = Math.min(score, 100);
+  const grade = score >= 80 ? 'S' : score >= 60 ? 'A' : score >= 40 ? 'B' : 'C';
+  return { score, grade, flags, warnings };
+}
+
+function renderCAResult(token, scoreResult, allPairs) {
+  const gc = gradeColor(scoreResult.grade);
+  const ageMin = token.pairCreatedAt ? Math.round((Date.now() - token.pairCreatedAt) / 60000) : null;
+  const ageStr = ageMin === null ? '?' : ageMin < 60 ? ageMin + 'm' : Math.floor(ageMin/60) + 'h ' + (ageMin%60) + 'm';
+
+  document.getElementById('ca-result').innerHTML = `
+    <!-- Token header -->
+    <div style="background:var(--surface);border:1px solid ${gc}30;padding:20px 24px;margin-bottom:16px;display:flex;align-items:center;gap:16px;box-shadow:0 0 30px ${gc}10;">
+      ${token.imageUrl ? `<img src="${token.imageUrl}" style="width:52px;height:52px;border-radius:50%;border:2px solid ${gc}40" onerror="this.style.display='none'">` : ''}
+      <div class="ca-grade-big ${scoreResult.grade}" style="background:${gc}20;color:${gc};box-shadow:0 0 20px ${gc}30;">${scoreResult.grade}</div>
+      <div style="flex:1;">
+        <div style="font-family:var(--font-display);font-size:22px;font-weight:900;color:#fff;">${esc(token.symbol)} <span style="font-size:14px;color:rgba(200,232,248,0.4);font-weight:400;">${esc(token.name)}</span></div>
+        <div style="font-family:var(--font-mono);font-size:10px;color:rgba(200,232,248,0.3);margin-top:4px;">${token.address}</div>
+        <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">
+          <span style="font-size:10px;padding:2px 8px;border:1px solid ${gc}40;color:${gc};background:${gc}10;">${token.dexId?.toUpperCase() || 'UNKNOWN DEX'}</span>
+          <span style="font-size:10px;padding:2px 8px;border:1px solid rgba(200,232,248,0.1);color:rgba(200,232,248,0.4);">${allPairs.length} PAIR${allPairs.length!==1?'S':''}</span>
+          ${ageMin !== null ? `<span style="font-size:10px;padding:2px 8px;border:1px solid ${ageMin<10?'var(--orange)':'rgba(200,232,248,0.1)'};color:${ageMin<10?'var(--orange)':'rgba(200,232,248,0.4)'};">${ageStr} OLD</span>` : ''}
+        </div>
+      </div>
+      <div style="text-align:right;">
+        <div style="font-family:var(--font-display);font-size:28px;font-weight:700;color:${gc};">${scoreResult.score}<span style="font-size:14px;color:rgba(200,232,248,0.3)">/100</span></div>
+        <div style="font-size:10px;color:rgba(200,232,248,0.3);letter-spacing:2px;">SIGNAL SCORE</div>
+      </div>
+    </div>
+
+    <!-- Score bar -->
+    <div style="background:var(--surface);border:1px solid var(--border);padding:16px 20px;margin-bottom:16px;">
+      <div style="display:flex;justify-content:space-between;margin-bottom:8px;font-size:10px;letter-spacing:2px;color:rgba(200,232,248,0.3);">
+        <span>SIGNAL STRENGTH</span><span style="color:${gc}">${scoreResult.grade === 'S' ? 'STRONG SIGNAL' : scoreResult.grade === 'A' ? 'WORTH WATCHING' : scoreResult.grade === 'B' ? 'SPECULATIVE' : 'SKIP'}</span>
+      </div>
+      <div style="height:8px;background:rgba(200,232,248,0.06);border-radius:4px;overflow:hidden;">
+        <div style="height:100%;width:${scoreResult.score}%;background:linear-gradient(90deg,${gc}88,${gc});border-radius:4px;transition:width 1s cubic-bezier(0.34,1.56,0.64,1);box-shadow:0 0 10px ${gc}60;"></div>
+      </div>
+    </div>
+
+    ${scoreResult.warnings.length ? `
+    <div style="background:rgba(255,34,68,0.06);border:1px solid rgba(255,34,68,0.2);padding:12px 16px;margin-bottom:16px;display:flex;gap:12px;flex-wrap:wrap;">
+      ${scoreResult.warnings.map(w=>`<span style="color:var(--red);font-size:11px;">${w}</span>`).join('')}
+    </div>` : ''}
+
+    <!-- Flags -->
+    ${scoreResult.flags.length ? `
+    <div class="ca-flags-wrap">
+      <div style="width:100%;font-size:9px;letter-spacing:2px;color:rgba(200,232,248,0.3);margin-bottom:8px;">SIGNALS DETECTED</div>
+      ${renderFlags(scoreResult.flags, false, true)}
+    </div>` : ''}
+
+    <!-- Stats grid -->
+    <div class="ca-result-grid" style="margin-bottom:16px;">
+      ${[
+        ['PRICE', fmtPrice(token.priceUsd), null],
+        ['5M CHANGE', fmtChg(token.priceChange5m), chgColor(token.priceChange5m)],
+        ['1H CHANGE', fmtChg(token.priceChange1h), chgColor(token.priceChange1h)],
+        ['6H CHANGE', fmtChg(token.priceChange6h), chgColor(token.priceChange6h)],
+        ['FDV', fmtLarge(token.fdv), null],
+        ['MARKET CAP', fmtLarge(token.marketCap), null],
+        ['LIQUIDITY', fmtLarge(token.liquidityUsd), token.liquidityUsd > 50000 ? 'var(--green)' : token.liquidityUsd < 5000 ? 'var(--red)' : null],
+        ['VOL 5M', fmtLarge(token.volume5m), null],
+        ['VOL 1H', fmtLarge(token.volume1h), null],
+        ['VOL 24H', fmtLarge(token.volume24h), null],
+        ['BUYS 5M', token.buys5m, 'var(--green)'],
+        ['SELLS 5M', token.sells5m, 'var(--red)'],
+        ['BUY RATIO', ((token.buyRatio5m||0.5)*100).toFixed(0)+'%', token.buyRatio5m > 0.65 ? 'var(--green)' : token.buyRatio5m < 0.35 ? 'var(--red)' : null],
+        ['BUYS 1H', token.buys1h, 'var(--green)'],
+        ['SELLS 1H', token.sells1h, 'var(--red)'],
+      ].map(([label,val,color])=>`
+        <div class="ca-stat">
+          <div class="ca-stat-label">${label}</div>
+          <div class="ca-stat-value" style="color:${color||'#c8e8f8'}">${val??'?'}</div>
+        </div>
+      `).join('')}
+    </div>
+
+    <!-- All pairs -->
+    ${allPairs.length > 1 ? `
+    <div style="background:var(--surface);border:1px solid var(--border);padding:16px 20px;margin-bottom:16px;">
+      <div style="font-size:9px;letter-spacing:2px;color:rgba(200,232,248,0.3);margin-bottom:12px;">ALL TRADING PAIRS (${allPairs.length})</div>
+      ${allPairs.slice(0,5).map(p=>`
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid rgba(0,200,255,0.05);">
+          <span style="font-size:11px;color:rgba(200,232,248,0.6);">${p.dexId} — ${p.quoteToken?.symbol||'?'}</span>
+          <div style="display:flex;gap:16px;font-size:11px;">
+            <span style="color:rgba(200,232,248,0.4)">Liq: ${fmtLarge(p.liquidity?.usd)}</span>
+            <span style="color:rgba(200,232,248,0.4)">Vol: ${fmtLarge(p.volume?.h24)}</span>
+            <a href="${p.url}" target="_blank" style="color:var(--cyan);font-size:10px;">CHART ↗</a>
+          </div>
+        </div>
+      `).join('')}
+    </div>` : ''}
+
+    <!-- Links -->
+    <div class="ca-links">
+      <a class="modal-link" href="https://pump.fun/${token.address}" target="_blank">🔗 PUMP.FUN</a>
+      <a class="modal-link" href="${token.dexUrl||'https://dexscreener.com/solana/'+token.address}" target="_blank">📊 DEXSCREENER</a>
+      <a class="modal-link" href="https://solscan.io/token/${token.address}" target="_blank">🔎 SOLSCAN</a>
+      <a class="modal-link" href="https://birdeye.so/token/${token.address}?chain=solana" target="_blank">👁 BIRDEYE</a>
+      <a class="modal-link" href="https://rugcheck.xyz/tokens/${token.address}" target="_blank">🛡 RUGCHECK</a>
+    </div>
+  `;
+}
+</script>
 <style>
   :root {
     --void: #000408;
@@ -748,6 +1005,30 @@
     0%   { opacity: 0.8; transform: scale(0.5); }
     100% { opacity: 0; transform: scale(1.5); }
   }
+
+  /* ── TABS ── */
+  .main-tabs { display:flex; border-bottom:1px solid var(--border); background:rgba(0,0,0,0.5); }
+  .main-tab { padding:12px 28px; background:none; border:none; border-bottom:2px solid transparent; color:rgba(200,232,248,0.3); font-family:var(--font-display); font-size:10px; letter-spacing:2px; cursor:none; transition:all 0.2s; }
+  .main-tab.active { border-bottom-color:var(--cyan); color:var(--cyan); }
+  .ca-input-wrap { display:flex; gap:10px; margin-bottom:24px; }
+  .ca-input { flex:1; background:rgba(0,200,255,0.05); border:1px solid var(--border); color:#fff; padding:14px 18px; font-family:var(--font-mono); font-size:13px; outline:none; transition:all 0.2s; clip-path:polygon(8px 0,100% 0,calc(100% - 8px) 100%,0 100%); }
+  .ca-input:focus { border-color:var(--cyan); box-shadow:var(--cyan-glow); }
+  .ca-btn { padding:14px 28px; background:var(--cyan-dim); border:1px solid var(--cyan); color:var(--cyan); font-family:var(--font-display); font-size:11px; letter-spacing:2px; cursor:none; transition:all 0.2s; clip-path:polygon(8px 0,100% 0,calc(100% - 8px) 100%,0 100%); }
+  .ca-btn:hover { background:rgba(0,200,255,0.25); box-shadow:var(--cyan-glow); }
+  .ca-btn:disabled { opacity:0.4; }
+  .ca-panel { display:none; padding:32px; max-width:960px; margin:0 auto; width:100%; }
+  .ca-result-grid { display:grid; grid-template-columns:1fr 1fr 1fr; gap:1px; background:var(--border); margin-bottom:20px; }
+  .ca-stat { background:var(--surface); padding:16px 18px; }
+  .ca-stat-label { font-size:9px; letter-spacing:2px; color:rgba(200,232,248,0.3); margin-bottom:6px; }
+  .ca-stat-value { font-family:var(--font-display); font-size:18px; font-weight:700; }
+  .ca-score-wrap { background:var(--surface); border:1px solid var(--border); padding:20px; margin-bottom:16px; }
+  .ca-flags-wrap { background:var(--surface); border:1px solid var(--border); padding:16px; margin-bottom:16px; display:flex; flex-wrap:wrap; gap:6px; }
+  .ca-links { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:16px; }
+  .ca-scanning { text-align:center; padding:60px 20px; }
+  .ca-scanning-ring { width:60px; height:60px; border:2px solid var(--cyan); border-top-color:transparent; border-radius:50%; margin:0 auto 20px; animation:spin 1s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .ca-error { background:rgba(255,34,68,0.08); border:1px solid rgba(255,34,68,0.3); padding:20px; color:var(--red); font-family:var(--font-mono); font-size:12px; }
+  .ca-grade-big { width:80px; height:80px; display:flex; align-items:center; justify-content:center; font-family:var(--font-display); font-weight:900; font-size:32px; clip-path:polygon(50% 0%,100% 50%,50% 100%,0% 50%); flex-shrink:0; }
 </style>
 </head>
 <body>
@@ -774,7 +1055,7 @@
         <span>LIVE</span>
       </div>
       <div class="header-time" id="clock">--:--:--</div>
-      <a href="https://t.me/trencheralerts" target="_blank" class="tg-btn">
+      <a href="https://t.me/trencheralertbot" target="_blank" class="tg-btn">
         ✈ TELEGRAM
       </a>
     </div>
@@ -812,8 +1093,15 @@
     </div>
   </div>
 
+
+  <!-- TABS -->
+  <div class="main-tabs">
+    <button class="main-tab active" id="tab-feed" onclick="switchTab('feed')">⬡ LIVE FEED</button>
+    <button class="main-tab" id="tab-scanner" onclick="switchTab('scanner')">⬡ CA SCANNER</button>
+  </div>
+
   <!-- MAIN GRID -->
-  <div class="main-grid">
+  <div class="main-grid" id="panel-feed">
 
     <!-- LEFT: TOKEN FEED -->
     <div class="feed-panel">
@@ -864,6 +1152,19 @@
       </div>
     </div>
 
+  </div>
+
+
+  <!-- CA SCANNER PANEL -->
+  <div class="ca-panel" id="panel-scanner">
+    <div style="font-family:var(--font-display);font-size:11px;letter-spacing:3px;color:var(--cyan);margin-bottom:6px;">CONTRACT ADDRESS ANALYZER</div>
+    <div style="font-size:12px;color:rgba(200,232,248,0.4);margin-bottom:20px;">Paste any Solana token CA — fetches live data from DexScreener and scores it instantly</div>
+    <div class="ca-input-wrap">
+      <input class="ca-input" id="ca-input" type="text" placeholder="e.g. So11111111111111111111111111111111111111112"
+        onkeydown="if(event.key==='Enter')analyzeCA()">
+      <button class="ca-btn" id="ca-btn" onclick="analyzeCA()">⬡ ANALYZE</button>
+    </div>
+    <div id="ca-result"></div>
   </div>
 
   <!-- FOOTER -->
